@@ -1,6 +1,51 @@
 # profile_ai.py
 import streamlit as st
-from utile import save_profile_to_qdrant, hash_password, get_user_profile
+from utile import save_profile_to_qdrant, hash_password, get_user_profile, username_exists
+
+
+def show_signup_form(client, model):
+    """Standalone signup form used by auth.py."""
+    with st.form("signup_form"):
+        col1, col2 = st.columns(2)
+        nom = col1.text_input("Nom")
+        prenom = col2.text_input("Prenom")
+        pseudo = st.text_input("Pseudo")
+        password = st.text_input("Mot de passe", type="password")
+        password2 = st.text_input("Confirmer le mot de passe", type="password")
+
+        age = st.number_input("Age", min_value=15, max_value=100, value=25)
+        teint = st.radio("Teint", ["Clair / Pâle", "Intermédiaire / Mat", "Foncé / Noir"])
+        morpho = st.selectbox("Morphologie", ["A", "V", "H", "X", "O"])
+        taille = st.number_input("Taille (cm)", min_value=120, max_value=220, value=170)
+        photo = st.file_uploader("Photo de profil (optionnel)", type=["png", "jpg", "jpeg"])
+
+        submitted = st.form_submit_button("Creer mon compte")
+
+    if submitted:
+        if not pseudo or not password:
+            st.warning("Pseudo et mot de passe sont obligatoires.")
+            return
+        if password != password2:
+            st.warning("Les mots de passe ne correspondent pas.")
+            return
+        if username_exists(client, pseudo):
+            st.error("Ce pseudo est deja pris.")
+            return
+
+        user_data = {
+            "nom": nom,
+            "prenom": prenom,
+            "user_pseudo": pseudo,
+            "age": age,
+            "teint": teint,
+            "morpho": morpho,
+            "taille": taille,
+        }
+        if photo is not None:
+            user_data["profile_img_file"] = photo
+
+        save_profile_to_qdrant(client, model, pseudo, user_data, password=password)
+        st.success("Compte cree ! Connectez-vous avec votre pseudo.")
 
 def show_profile_sidebar(client, model, username, user_profile=None, require_password=False):
     """

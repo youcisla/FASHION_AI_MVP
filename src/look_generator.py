@@ -79,7 +79,7 @@ def render(client, model, user_profile, username):
             query = advisor.build_occasion_query(occasion, user_profile)
 
             with st.spinner(f"Creation du look {occasion}..."):
-                vec = model().encode(query).tolist()
+                vec = model.encode(query).tolist()
                 try:
                     results = client.search(collection_name="fashion_images", query_vector=vec, limit=6)
                 except Exception:
@@ -121,7 +121,7 @@ def render(client, model, user_profile, username):
             if img_file:
                 with st.spinner("Composition du look..."):
                     pil_img = Image.open(img_file)
-                    vec = model().encode(pil_img).tolist()
+                    vec = model.encode(pil_img).tolist()
                     try:
                         img_results = client.search(
                             collection_name="fashion_images", query_vector=vec, limit=5,

@@ -10,7 +10,12 @@ from qdrant_client import QdrantClient
 
 
 def run_validation(expected_count: int, report_dir: str = "Data/reports"):
-    client = QdrantClient(host="localhost", port=6333)
+    qdrant_url = os.getenv("QDRANT_URL")
+    qdrant_api_key = os.getenv("QDRANT_API_KEY")
+    if qdrant_url:
+        client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key, timeout=30)
+    else:
+        client = QdrantClient(host="localhost", port=6333, timeout=30)
     count = client.count(collection_name="fashion_images").count
     print(f"Expected: {expected_count}, In Qdrant: {count}")
 
