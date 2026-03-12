@@ -1,16 +1,18 @@
 # utile.py
 import hashlib
 import os
+import io
+import base64
+import secrets
 from PIL import Image
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
-from sentence_transformers import SentenceTransformer
+import streamlit as st
 
-# ---------------- INIT TOOLS ----------------
-def init_tools():
-    """Initialisation du modèle et du client Qdrant."""
-    model = SentenceTransformer("clip-ViT-B-32")
-
+# ---------------- CACHED QDRANT CLIENT ----------------
+@st.cache_resource
+def get_qdrant_client():
+    """Qdrant client — created once, shared across sessions."""
     qdrant_url = os.getenv("QDRANT_URL")
     qdrant_api_key = os.getenv("QDRANT_API_KEY")
 
@@ -38,48 +40,63 @@ def init_tools():
             )
         )
 
-    return model, client
+    return client
 
-# ---------------- HASH PASSWORD ----------------
-def hash_password(password: str) -> str:
-    """Retourne le hash SHA256 du mot de passe."""
-    return hashlib.sha256(password.encode()).hexdigest()
+# ---------------- CACHED CLIP MODEL (lazy) ----------------
+@st.cache_resource
+def get_model():
+    """CLIP model — loaded once on first use, shared across sessions."""
+    from sentence_transformers import SentenceTransformer
+    return SentenceTransformer("clip-ViT-B-32")
+
+# ---------------- INIT TOOLS (compat wrapper) ----------------
+def init_tools():
+    """Returns (model_loader, client). model_loader is callable — call get_model() when needed."""
+    return get_model, get_qdrant_client()
+
+# ---------------- HASH PASSWORD (PBKDF2) ----------------
+def hash_password(password: str, salt: str | None = None) -> str:
+    """Hash password with PBKDF2-HMAC-SHA256. Returns salt:hash."""
+    if salt is None:
+        salt = secrets.token_hex(16)
+    h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), iterations=100_000)
+    return f"{salt}:{h.hex()}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    """Verify password against stored salt:hash. Also accepts legacy SHA-256."""
+    if ":" in stored:
+        salt = stored.split(":")[0]
+        return hash_password(password, salt) == stored
+    # Legacy: plain SHA-256 (for existing accounts)
+    return hashlib.sha256(password.encode()).hexdigest() == stored
 
 # ---------------- USER ID STABLE ----------------
 def generate_user_id(username: str) -> int:
     """Génère un ID stable pour Qdrant à partir du pseudo."""
     return int(hashlib.sha256(username.encode()).hexdigest(), 16) % (10**12)
 
-# ---------------- SAVE PROFILE IMAGE ----------------
+# ---------------- SAVE PROFILE IMAGE (base64) ----------------
 def save_profile_image(uploaded_file, username):
     """
-    Sauvegarde l'image uploadée avec le bon format.
-    Convertit PNG en JPG si nécessaire.
+    Encode uploaded image as base64 JPEG thumbnail for Qdrant storage.
+    Returns base64 string (no local file needed).
     """
     if uploaded_file is None:
         return None
-
-    os.makedirs("profile_images", exist_ok=True)
-
-    # Nom de base
-    filename_base = f"profile_images/{username}"
-
     try:
         image = Image.open(uploaded_file)
-
-        # Si l'image est PNG avec transparence, convertit en RGB
-        if image.mode in ("RGBA", "LA"):
+        if image.mode in ("RGBA", "LA", "P"):
             image = image.convert("RGB")
-
-        # On force l'extension en .jpg pour uniformité
-        path = f"{filename_base}.jpg"
-        image.save(path, format="JPEG")
-
-        return path
-
+        # Resize to max 200px wide for profile thumbnails
+        ratio = 200 / image.width
+        image = image.resize((200, int(image.height * ratio)), Image.LANCZOS)
+        buf = io.BytesIO()
+        image.save(buf, format="JPEG", quality=85)
+        return base64.b64encode(buf.getvalue()).decode("ascii")
     except Exception as e:
-        print("         ", e)
-        return None                 
+        print("        ", e)
+        return None
 
 # ---------------- SAVE / UPDATE USER ----------------
 def save_profile_to_qdrant(client, model, username: str, user_data: dict, password: str | None = None):
@@ -89,12 +106,14 @@ def save_profile_to_qdrant(client, model, username: str, user_data: dict, passwo
     """
     user_id = generate_user_id(username)
 
-    # Gestion de l'image
+    # Gestion de l'image — store as base64
     profile_img = user_data.get("profile_img_file")
     if profile_img:
-        img_path = save_profile_image(profile_img, username)
-        user_data["profile_img_path"] = img_path
-        del user_data["profile_img_file"]
+        b64 = save_profile_image(profile_img, username)
+        if b64:
+            user_data["profile_img_b64"] = b64
+        user_data.pop("profile_img_file", None)
+        user_data.pop("profile_img_path", None)
 
     # Hash du mot de passe si présent
     if password:
@@ -107,6 +126,9 @@ def save_profile_to_qdrant(client, model, username: str, user_data: dict, passwo
     {user_data.get('age','')}
     {user_data.get('taille','')}
     """
+    # Resolve model if it's a lazy loader
+    if callable(model) and not hasattr(model, 'encode'):
+        model = model()
     vec = model.encode(profile_text).tolist()
 
     # Upsert dans Qdrant
@@ -147,3 +169,42 @@ def get_color_advice(teint: str) -> str:
     if teint == "Foncé / Noir":
         return "Couleurs recommandées : jaune vif, blanc, violet."
     return ""
+
+
+# ---------------- USERNAME EXISTS CHECK ----------------
+def username_exists(client, username: str) -> bool:
+    """Check if a username is already registered."""
+    user_id = generate_user_id(username)
+    try:
+        res = client.retrieve(collection_name="user_profiles", ids=[user_id])
+        return len(res) > 0
+    except Exception:
+        return False
+
+
+# ---------------- FAVORITES ----------------
+def get_favorites(client, username: str) -> list[str]:
+    """Return list of favorite point IDs for a user."""
+    profile = get_user_profile(client, username)
+    if profile and "favorites" in profile:
+        return profile["favorites"]
+    return []
+
+
+def toggle_favorite(client, username: str, point_id: str):
+    """Add or remove a point ID from the user's favorites list."""
+    user_id = generate_user_id(username)
+    profile = get_user_profile(client, username) or {}
+    favs = profile.get("favorites", [])
+
+    if point_id in favs:
+        favs.remove(point_id)
+    else:
+        favs.append(point_id)
+
+    # Update only the favorites field
+    client.set_payload(
+        collection_name="user_profiles",
+        payload={"favorites": favs},
+        points=[user_id],
+    )

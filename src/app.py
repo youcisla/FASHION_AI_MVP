@@ -2,6 +2,8 @@
 import streamlit as st
 import requests
 import os
+import io
+import base64
 from datetime import datetime
 
 # ─── Load env vars: Streamlit Cloud secrets → os.environ ──────────────────────
@@ -12,7 +14,7 @@ try:
 except FileNotFoundError:
     pass
 
-from utile import init_tools, get_user_profile, hash_password
+from utile import init_tools, get_user_profile, hash_password, verify_password, get_model, toggle_favorite, get_favorites, username_exists
 from profile_ai import show_profile_sidebar
 
 # ─── Airflow config ───────────────────────────────────────────────────────────
@@ -188,10 +190,23 @@ if "logged_in" not in st.session_state:
     st.session_state.username = ""
 if "page" not in st.session_state:
     st.session_state.page = "home"
+if "favorites" not in st.session_state:
+    st.session_state.favorites = set()
 
 
 def go_to(page):
     st.session_state.page = page
+
+
+def display_image(payload, **kwargs):
+    """Display an image from Qdrant payload: prefers base64 thumbnail, falls back to path."""
+    b64 = payload.get("thumb_b64")
+    if b64:
+        st.image(f"data:image/jpeg;base64,{b64}", **kwargs)
+    else:
+        path = payload.get("path", payload.get("image_path", ""))
+        if path:
+            st.image(path, **kwargs)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -221,7 +236,7 @@ if not st.session_state.logged_in:
             else:
                 user_profile = get_user_profile(client, username_input)
                 if user_profile and "password" in user_profile:
-                    if hash_password(password_input) == user_profile["password"]:
+                    if verify_password(password_input, user_profile["password"]):
                         st.session_state.logged_in = True
                         st.session_state.username = username_input
                         st.session_state.page = "home"
@@ -240,12 +255,20 @@ if not st.session_state.logged_in:
 else:
     username = st.session_state.username
     user_profile = get_user_profile(client, username) or {}
-    profile_img_path = user_profile.get("profile_img_path") or user_profile.get("profile_img_file")
+    # Profile image: prefer base64, fallback to path
+    profile_img_b64 = user_profile.get("profile_img_b64")
+    profile_img_path = user_profile.get("profile_img_path")
     prenom = user_profile.get("prenom", username)
+
+    # Load favorites into session
+    if not st.session_state.favorites:
+        st.session_state.favorites = set(get_favorites(client, username))
 
     # ──── Sidebar ─────────────────────────────────────────────────────────────
     with st.sidebar:
-        if profile_img_path:
+        if profile_img_b64:
+            st.image(f"data:image/jpeg;base64,{profile_img_b64}", width=100)
+        elif profile_img_path:
             st.image(profile_img_path, width=100)
         st.markdown(f"### {prenom}")
         st.caption(f"@{username}")
@@ -259,6 +282,9 @@ else:
             st.rerun()
         if st.button("✨ Look Generator", use_container_width=True):
             go_to("looks")
+            st.rerun()
+        if st.button("❤️ Favoris", use_container_width=True):
+            go_to("favorites")
             st.rerun()
         if st.button("📊 Analytics", use_container_width=True):
             go_to("analytics")
@@ -294,6 +320,15 @@ else:
         </div>
         """, unsafe_allow_html=True)
 
+        # ─── Profile completeness ─────────────────────────────────────────
+        profile_fields = ["nom", "prenom", "age", "taille", "teint", "morpho"]
+        has_img = bool(user_profile.get("profile_img_b64") or user_profile.get("profile_img_path"))
+        filled = sum(1 for f in profile_fields if user_profile.get(f)) + (1 if has_img else 0)
+        pct = int(filled / (len(profile_fields) + 1) * 100)
+        if pct < 100:
+            st.progress(pct / 100, text=f"Profil complété à {pct}%")
+            st.caption("Complétez votre profil pour de meilleures recommandations.")
+
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("""
@@ -323,6 +358,18 @@ else:
         with c3:
             st.markdown("""
             <div class="feature-card">
+                <div class="icon">❤️</div>
+                <div class="label">Favoris</div>
+                <div class="desc">Vos pièces sauvegardées</div>
+            </div>
+            """, unsafe_allow_html=True)
+            if st.button("Mes favoris", key="nav_favorites"):
+                go_to("favorites")
+                st.rerun()
+
+        with c4:
+            st.markdown("""
+            <div class="feature-card">
                 <div class="icon">📊</div>
                 <div class="label">Analytics</div>
                 <div class="desc">Analysez votre style</div>
@@ -332,43 +379,51 @@ else:
                 go_to("analytics")
                 st.rerun()
 
-        with c4:
-            st.markdown("""
-            <div class="feature-card">
-                <div class="icon">⚙️</div>
-                <div class="label">Pipeline</div>
-                <div class="desc">Gérez l'indexation</div>
-            </div>
-            """, unsafe_allow_html=True)
-            if st.button("Voir le pipeline", key="nav_pipeline"):
-                go_to("pipeline")
-                st.rerun()
-
     # ══════════════════════════════════════════════════════════════════════════
     #  SEARCH
     # ══════════════════════════════════════════════════════════════════════════
     elif page == "search":
+        if st.button("← Accueil", key="back_search"):
+            go_to("home")
+            st.rerun()
         st.markdown("## 🔍 Recherche Mode")
+
+        # Quick filters
+        categories = ["Robe", "Veste", "Pantalon", "Jupe", "Manteau", "T-shirt", "Chaussures"]
+        filter_cols = st.columns(len(categories))
+        selected_cat = ""
+        for i, cat in enumerate(categories):
+            if filter_cols[i].button(cat, key=f"cat_{cat}"):
+                selected_cat = cat
 
         q = st.text_input(
             "Décrivez ce que vous cherchez",
+            value=selected_cat,
             placeholder="Ex: robe rouge élégante, veste en cuir noire...",
             label_visibility="collapsed",
         )
 
         if q:
             with st.spinner("Recherche en cours..."):
-                vec = model.encode(q).tolist()
+                vec = model().encode(q).tolist()
                 res = client.search(collection_name="fashion_images", query_vector=vec, limit=6)
 
             if res:
                 st.caption(f"{len(res)} résultats pour « {q} »")
                 cols = st.columns(2)
                 for i, h in enumerate(res):
-                    cols[i % 2].image(
-                        h.payload.get("path", h.payload.get("image_path", "")),
-                        use_container_width=True,
-                    )
+                    with cols[i % 2]:
+                        display_image(h.payload, use_container_width=True)
+                        point_id = str(h.id)
+                        is_fav = point_id in st.session_state.favorites
+                        label = "💔 Retirer" if is_fav else "❤️ Favoris"
+                        if st.button(label, key=f"fav_s_{point_id}"):
+                            toggle_favorite(client, username, point_id)
+                            if is_fav:
+                                st.session_state.favorites.discard(point_id)
+                            else:
+                                st.session_state.favorites.add(point_id)
+                            st.rerun()
             else:
                 st.info("Aucun résultat trouvé. Essayez d'autres mots-clés.")
         else:
@@ -378,6 +433,9 @@ else:
     #  LOOK GENERATOR
     # ══════════════════════════════════════════════════════════════════════════
     elif page == "looks":
+        if st.button("← Accueil", key="back_looks"):
+            go_to("home")
+            st.rerun()
         st.markdown("## ✨ Salon d'Essayage")
 
         from utile import get_color_advice
@@ -389,62 +447,130 @@ else:
             type=["png", "jpg", "jpeg"],
             help="L'IA trouvera des pièces assorties",
         )
-        source_img = img if img else profile_img_path
+        source_img = img
+        if not source_img and profile_img_b64:
+            source_img = io.BytesIO(base64.b64decode(profile_img_b64))
+        elif not source_img and profile_img_path:
+            source_img = profile_img_path
 
         if source_img:
             with st.spinner("Génération du look..."):
-                vec = model.encode(source_img).tolist()
+                vec = model().encode(source_img).tolist()
                 res = client.search(collection_name="fashion_images", query_vector=vec, limit=5)
 
             if res:
                 st.markdown("**Pièce principale**")
-                st.image(
-                    res[0].payload.get("path", res[0].payload.get("image_path", "")),
-                    use_container_width=True,
-                )
+                display_image(res[0].payload, use_container_width=True)
 
                 st.markdown("**Suggestions assorties**")
                 cols = st.columns(2)
                 for i, h in enumerate(res[1:]):
-                    cols[i % 2].image(
-                        h.payload.get("path", h.payload.get("image_path", "")),
-                        use_container_width=True,
-                    )
+                    with cols[i % 2]:
+                        display_image(h.payload, use_container_width=True)
+                        point_id = str(h.id)
+                        is_fav = point_id in st.session_state.favorites
+                        label = "💔 Retirer" if is_fav else "❤️ Favoris"
+                        if st.button(label, key=f"fav_l_{point_id}"):
+                            toggle_favorite(client, username, point_id)
+                            if is_fav:
+                                st.session_state.favorites.discard(point_id)
+                            else:
+                                st.session_state.favorites.add(point_id)
+                            st.rerun()
         else:
             st.caption("Uploadez une image ou ajoutez une photo de profil pour commencer.")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  FAVORITES
+    # ══════════════════════════════════════════════════════════════════════════
+    elif page == "favorites":
+        if st.button("← Accueil", key="back_favorites"):
+            go_to("home")
+            st.rerun()
+        st.markdown("## ❤️ Mes Favoris")
+
+        fav_ids = list(st.session_state.favorites)
+        if fav_ids:
+            try:
+                fav_points = client.retrieve(collection_name="fashion_images", ids=fav_ids)
+            except Exception:
+                fav_points = []
+
+            if fav_points:
+                st.caption(f"{len(fav_points)} article(s) sauvegardé(s)")
+                cols = st.columns(2)
+                for i, pt in enumerate(fav_points):
+                    with cols[i % 2]:
+                        display_image(pt.payload, use_container_width=True)
+                        if st.button("💔 Retirer", key=f"unfav_{pt.id}"):
+                            toggle_favorite(client, username, str(pt.id))
+                            st.session_state.favorites.discard(str(pt.id))
+                            st.rerun()
+            else:
+                st.info("Vos favoris n'ont pas pu être chargés.")
+        else:
+            st.info("Vous n'avez pas encore de favoris. Explorez le catalogue et sauvegardez des pièces !")
 
     # ══════════════════════════════════════════════════════════════════════════
     #  ANALYTICS
     # ══════════════════════════════════════════════════════════════════════════
     elif page == "analytics":
+        if st.button("← Accueil", key="back_analytics"):
+            go_to("home")
+            st.rerun()
         st.markdown("## 📊 Analyse du Catalogue")
 
         import pandas as pd
         import plotly.express as px
         from sklearn.decomposition import PCA
+        from sklearn.cluster import KMeans
 
         with st.spinner("Chargement des données..."):
             pts = client.scroll(collection_name="fashion_images", with_vectors=True)[0]
 
         if pts:
-            st.metric("Articles dans le catalogue", len(pts))
+            # ─── Key metrics row ──────────────────────────────────────────
+            m1, m2, m3 = st.columns(3)
+            m1.metric("📦 Articles", len(pts))
+            m2.metric("❤️ Favoris", len(st.session_state.favorites))
+            profile_fields = ["nom", "prenom", "age", "taille", "teint", "morpho"]
+            has_img = bool(user_profile.get("profile_img_b64") or user_profile.get("profile_img_path"))
+            pct = int((sum(1 for f in profile_fields if user_profile.get(f)) + (1 if has_img else 0)) / (len(profile_fields) + 1) * 100)
+            m3.metric("👤 Profil", f"{pct}%")
 
+            st.divider()
+
+            # ─── PCA scatter with clusters ────────────────────────────────
             vecs = [p.vector for p in pts]
+            n_clusters = min(5, len(pts))
             pca = PCA(n_components=2).fit_transform(vecs)
+            clusters = KMeans(n_clusters=n_clusters, n_init=10, random_state=42).fit_predict(vecs)
             df = pd.DataFrame(pca, columns=["x", "y"])
+            df["cluster"] = [f"Groupe {c+1}" for c in clusters]
+
             fig = px.scatter(
-                df, x="x", y="y",
-                title="Distribution du catalogue (PCA)",
-                color_discrete_sequence=["#FF4B6E"],
+                df, x="x", y="y", color="cluster",
+                title="Distribution du catalogue (PCA + Clusters)",
+                color_discrete_sequence=px.colors.qualitative.Set2,
             )
             fig.update_layout(
                 margin=dict(l=10, r=10, t=40, b=10),
                 plot_bgcolor="rgba(0,0,0,0)",
                 xaxis=dict(showgrid=False),
                 yaxis=dict(showgrid=False),
+                legend_title_text="",
             )
             fig.update_traces(marker=dict(size=8, opacity=0.7))
             st.plotly_chart(fig, use_container_width=True)
+
+            # ─── Style summary ────────────────────────────────────────────
+            st.divider()
+            st.markdown("### 👤 Votre profil style")
+            from utile import get_color_advice
+            teint = user_profile.get("teint", "Clair / Pâle")
+            morpho = user_profile.get("morpho", "A")
+            st.markdown(f"**Morphologie :** {morpho} &emsp; **Teint :** {teint}")
+            st.info(f"💡 {get_color_advice(teint)}")
         else:
             st.info("Le catalogue est vide. Lancez le pipeline pour indexer des images.")
 
@@ -452,6 +578,9 @@ else:
     #  PIPELINE ADMIN
     # ══════════════════════════════════════════════════════════════════════════
     elif page == "pipeline":
+        if st.button("← Accueil", key="back_pipeline"):
+            go_to("home")
+            st.rerun()
         st.markdown("## ⚙️ Pipeline Airflow")
 
         col1, col2 = st.columns(2)

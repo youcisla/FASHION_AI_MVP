@@ -1,6 +1,6 @@
 # profile_ai.py
 import streamlit as st
-from utile import save_profile_to_qdrant, hash_password, get_user_profile
+from utile import save_profile_to_qdrant, hash_password, get_user_profile, username_exists
  
 def show_profile_sidebar(client, model, username, user_profile=None, require_password=False):
     """
@@ -83,6 +83,10 @@ def show_profile_sidebar(client, model, username, user_profile=None, require_pas
                 updated_fields["profile_img_file"] = profile_img_input
  
             if updated_fields:
+                # Username uniqueness check on signup
+                if require_password and username_exists(client, username_input):
+                    st.error("Ce pseudo est déjà pris. Choisissez-en un autre.")
+                    st.stop()
                 # Appel patch / update partiel
                 save_profile_to_qdrant(client, model, username_input, updated_fields)
                 if require_password:
