@@ -8,8 +8,7 @@ from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.operators.bash import BashOperator
-from airflow.providers.common.sql.sensors.sql import SqlSensor
-from airflow.operators.dummy import DummyOperator
+from airflow.operators.empty import EmptyOperator
 from airflow.utils.task_group import TaskGroup
 from airflow.models import Variable
 import os
@@ -34,7 +33,7 @@ default_args = {
     "owner": "fashion-ai-team",
     "depends_on_past": False,
     "email": ["data-team@company.com"],
-    "email_on_failure": True,
+    "email_on_failure": False,
     "email_on_retry": False,
     "retries": 2,
     "retry_delay": timedelta(minutes=5),
@@ -88,7 +87,7 @@ def check_spark_installation():
 with dag:
     
     # Start task
-    start = DummyOperator(task_id="start")
+    start = EmptyOperator(task_id="start")
     
     # Setup task
     task_setup = PythonOperator(
@@ -296,7 +295,6 @@ if __name__ == "__main__":
         def check_qdrant_health(**context):
             """Check Qdrant service health."""
             from qdrant_client import QdrantClient
-            from qdrant_client.http.exceptions import UnexpectedResponse
             
             try:
                 client = QdrantClient(
@@ -321,7 +319,6 @@ if __name__ == "__main__":
             from sentence_transformers import SentenceTransformer
             from qdrant_client import QdrantClient
             from qdrant_client.models import PointStruct, VectorParams, Distance
-            import numpy as np
             
             ti = context["ti"]
             images_metadata = ti.xcom_pull(
@@ -342,7 +339,7 @@ if __name__ == "__main__":
             # Create or recreate collection
             try:
                 client.delete_collection(collection_name)
-            except:
+            except Exception:
                 pass
             
             client.create_collection(
@@ -442,6 +439,10 @@ if __name__ == "__main__":
             key="indexing_errors"
         ) or []
         
+        # Detect if indexing never ran (upstream failure)
+        indexing_skipped = (image_count > 0 and indexed_count == 0
+                           and len(errors) == 0)
+        
         success_rate = (indexed_count / image_count * 100) if image_count > 0 else 0
         
         # Create detailed report
@@ -461,6 +462,7 @@ if __name__ == "__main__":
             "quality_checks": {
                 "min_success_rate_met": success_rate >= PIPELINE_CONFIG["min_success_rate"],
                 "has_indexed_data": indexed_count > 0,
+                "indexing_skipped": indexing_skipped,
             },
             "error_summary": errors[:10] if errors else [],  # First 10 errors
         }
@@ -477,6 +479,10 @@ if __name__ == "__main__":
         logging.info(f"Pipeline metrics - Success rate: {success_rate:.1f}%")
         
         # Quality gate
+        if indexing_skipped:
+            raise RuntimeError(
+                "Indexing was skipped due to upstream task failure — check vector_indexing logs"
+            )
         if success_rate < PIPELINE_CONFIG["min_success_rate"]:
             raise ValueError(
                 f"Pipeline quality gate failed: {success_rate:.1f}% < {PIPELINE_CONFIG['min_success_rate']}%"
@@ -494,7 +500,7 @@ if __name__ == "__main__":
     )
     
     # End task
-    end = DummyOperator(
+    end = EmptyOperator(
         task_id="end",
         trigger_rule="all_done"
     )
