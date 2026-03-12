@@ -7,24 +7,14 @@ import secrets
 from PIL import Image
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
+from sentence_transformers import SentenceTransformer
 import streamlit as st
-
-
-# ---------------- SECRET HELPER ────────────────────────────────────────────────
-def _get_secret(key: str, default: str = "") -> str:
-    """Read from st.secrets first (Streamlit Cloud), fall back to os.environ (local dev)."""
-    try:
-        return st.secrets[key]
-    except (KeyError, FileNotFoundError):
-        return os.getenv(key, default)
-
-
-# ---------------- CACHED QDRANT CLIENT ----------------
 @st.cache_resource
-def get_qdrant_client():
-    """Qdrant client — created once, shared across sessions."""
-    qdrant_url = _get_secret("QDRANT_URL")
-    qdrant_api_key = _get_secret("QDRANT_API_KEY")
+
+# ---------------- INIT TOOLS ----------------
+def init_tools():
+    """Initialisation du modèle et du client Qdrant."""
+    model = SentenceTransformer("clip-ViT-B-32")
 
     if qdrant_url:
         client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key, timeout=120)
@@ -122,7 +112,7 @@ def save_profile_to_qdrant(client, model, username: str, user_data: dict, passwo
 
     # Hash du mot de passe si présent
     if password:
-        user_data["password_hash"] = hash_password(password)
+        user_data["password"] = hash_password(password)
 
     # Embedding texte pour Qdrant
     profile_text = f"""
@@ -164,6 +154,28 @@ def get_user_profile(client, username: str) -> dict | None:
         print("Erreur Qdrant:", e)
         return None
 
+
+def init_tools():
+    model = SentenceTransformer("clip-ViT-B-32")
+
+    client = QdrantClient(
+        host="localhost",
+        port=6333,
+        timeout=120
+    )
+
+    collections = [c.name for c in client.get_collections().collections]
+
+    if "user_profiles" not in collections:
+        client.create_collection(
+            collection_name="user_profiles",
+            vectors_config=VectorParams(
+                size=512,
+                distance=Distance.COSINE
+            )
+        )
+
+    return model, client
 # ---------------- COLOR ADVICE ----------------
 def get_color_advice(teint: str) -> str:
     """Donne des conseils de couleurs en fonction du teint."""
