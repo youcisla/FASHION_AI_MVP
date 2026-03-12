@@ -40,3 +40,8 @@ src/profile_images/
 
 # Data files
 Data/catalog/
+Data/processed/
+Data/reports/
+
+# Airflow
+airflow/logs/

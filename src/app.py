@@ -1,7 +1,16 @@
 # app.py
 import streamlit as st
+import requests
+import os
+from datetime import datetime
 from utile import init_tools, get_user_profile, hash_password
 from profile_ai import show_profile_sidebar
+
+# ─── Airflow config ───────────────────────────────────────────────────────────
+AIRFLOW_BASE_URL = os.getenv("AIRFLOW_BASE_URL", "http://localhost:8080")
+AIRFLOW_USER = os.getenv("AIRFLOW_USER", "admin")
+AIRFLOW_PASSWORD = os.getenv("AIRFLOW_PASSWORD", "admin")
+DAG_ID = "fashion_pipeline"
 
 # ---------------- INIT ----------------
 model, client = init_tools()
@@ -64,7 +73,7 @@ else:
     # ---------------- DASHBOARD ----------------
     mode = st.selectbox(
         "Fonctionnalité",
-        ["Recherche", "Look Generator", "Analytics"]
+        ["Recherche", "Look Generator", "Analytics", "Pipeline Admin"]
     )
 
     # ---------------- RECHERCHE ----------------
@@ -110,3 +119,81 @@ else:
         df = pd.DataFrame(pca, columns=["x", "y"])
         fig = px.scatter(df, x="x", y="y", title="Distribution du catalogue")
         st.plotly_chart(fig)
+
+    # ---------------- PIPELINE ADMIN ----------------
+    elif mode == "Pipeline Admin":
+        st.header("⚙️ Gestion du Pipeline Airflow")
+
+        col1, col2 = st.columns(2)
+
+        # Trigger DAG manually
+        with col1:
+            if st.button("▶️ Lancer le pipeline maintenant"):
+                run_id = f"manual__{datetime.utcnow().isoformat()}"
+                try:
+                    response = requests.post(
+                        f"{AIRFLOW_BASE_URL}/api/v1/dags/{DAG_ID}/dagRuns",
+                        json={"dag_run_id": run_id},
+                        auth=(AIRFLOW_USER, AIRFLOW_PASSWORD),
+                        timeout=10,
+                    )
+                    if response.status_code == 200:
+                        st.success(f"Pipeline lancé ! Run ID: {run_id}")
+                    else:
+                        st.error(f"Erreur : {response.text}")
+                except requests.exceptions.ConnectionError:
+                    st.error("Impossible de contacter Airflow. Vérifiez que le service est démarré.")
+
+        # Get last DAG run status
+        with col2:
+            if st.button("🔄 Statut du dernier run"):
+                try:
+                    response = requests.get(
+                        f"{AIRFLOW_BASE_URL}/api/v1/dags/{DAG_ID}/dagRuns"
+                        "?limit=1&order_by=-execution_date",
+                        auth=(AIRFLOW_USER, AIRFLOW_PASSWORD),
+                        timeout=10,
+                    )
+                    if response.status_code == 200:
+                        runs = response.json().get("dag_runs", [])
+                        if runs:
+                            last = runs[0]
+                            st.json({
+                                "state": last["state"],
+                                "run_id": last["dag_run_id"],
+                                "start_date": last["start_date"],
+                                "end_date": last["end_date"],
+                            })
+                        else:
+                            st.info("Aucun run trouvé.")
+                    else:
+                        st.error(f"Erreur : {response.text}")
+                except requests.exceptions.ConnectionError:
+                    st.error("Impossible de contacter Airflow. Vérifiez que le service est démarré.")
+
+        # Run history
+        st.subheader("📋 Historique des runs")
+        try:
+            response = requests.get(
+                f"{AIRFLOW_BASE_URL}/api/v1/dags/{DAG_ID}/dagRuns"
+                "?limit=5&order_by=-execution_date",
+                auth=(AIRFLOW_USER, AIRFLOW_PASSWORD),
+                timeout=10,
+            )
+            if response.status_code == 200:
+                runs = response.json().get("dag_runs", [])
+                if runs:
+                    for run in runs:
+                        color = (
+                            "🟢" if run["state"] == "success"
+                            else "🔴" if run["state"] == "failed"
+                            else "🟡"
+                        )
+                        st.write(
+                            f"{color} `{run['dag_run_id']}` — "
+                            f"{run['state']} — {run['start_date']}"
+                        )
+                else:
+                    st.info("Aucun run dans l'historique.")
+        except requests.exceptions.ConnectionError:
+            st.warning("Airflow non disponible — historique indisponible.")

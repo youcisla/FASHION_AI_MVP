@@ -1,0 +1,14 @@
+# Core application (Windows-compatible — works with Python 3.10+)
+streamlit>=1.32.0
+qdrant-client>=1.9.0
+sentence-transformers>=2.7.0
+Pillow>=10.0.0
+redis>=5.0.0
+watchdog>=4.0.0
+plotly>=5.20.0
+pandas>=2.0.0
+scikit-learn>=1.4.0
+requests>=2.31.0
+
+# Airflow & Spark — install only in WSL2/Docker/Linux (NOT native Windows)
+# See requirements-airflow.txt

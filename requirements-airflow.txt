@@ -1,0 +1,4 @@
+# Airflow & Spark — requires Python 3.11 or 3.12, Linux/WSL2/Docker only
+apache-airflow==2.9.2
+apache-airflow-providers-apache-spark>=4.7.0
+pyspark>=3.5.0
