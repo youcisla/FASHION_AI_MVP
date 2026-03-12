@@ -27,6 +27,9 @@ dist/
 .env
 .env.*
 
+# Streamlit secrets
+**/.streamlit/secrets.toml
+
 # Logs
 *.log
 
