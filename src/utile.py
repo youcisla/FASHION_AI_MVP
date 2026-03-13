@@ -27,22 +27,31 @@ def get_qdrant_client():
     qdrant_api_key = _get_secret("QDRANT_API_KEY")
 
     if qdrant_url:
-        client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key, timeout=120)
+        client = QdrantClient(
+            url=qdrant_url,
+            api_key=qdrant_api_key if qdrant_api_key else None,
+            timeout=30,
+            prefer_grpc=False,
+        )
     else:
-        client = QdrantClient(host="localhost", port=6333, timeout=120)
+        client = QdrantClient(host="localhost", port=6333, timeout=30)
 
     # Auto-create collections if absent
-    collections = [c.name for c in client.get_collections().collections]
-    if "user_profiles" not in collections:
-        client.create_collection(
-            collection_name="user_profiles",
-            vectors_config=VectorParams(size=512, distance=Distance.COSINE),
-        )
-    if "fashion_images" not in collections:
-        client.create_collection(
-            collection_name="fashion_images",
-            vectors_config=VectorParams(size=512, distance=Distance.COSINE),
-        )
+    try:
+        collections = [c.name for c in client.get_collections().collections]
+        if "user_profiles" not in collections:
+            client.create_collection(
+                collection_name="user_profiles",
+                vectors_config=VectorParams(size=512, distance=Distance.COSINE),
+            )
+        if "fashion_images" not in collections:
+            client.create_collection(
+                collection_name="fashion_images",
+                vectors_config=VectorParams(size=512, distance=Distance.COSINE),
+            )
+    except Exception as e:
+        st.warning(f"Qdrant collection check failed: {e}")
+
     return client
 
 
